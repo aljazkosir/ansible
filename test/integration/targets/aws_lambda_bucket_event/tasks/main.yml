@@ -1,0 +1,128 @@
+---
+# ============================================================
+- name: set up aws connection info
+  set_fact:
+    aws_connection_info: &aws_connection_info
+      aws_access_key: "{{ aws_access_key }}"
+      aws_secret_key: "{{ aws_secret_key }}"
+      security_token: "{{ security_token }}"
+      region: "{{ aws_region }}"
+  no_log: yes
+# ============================================================
+- name: test add lambda bucket event
+  block:
+    - name: move lambda into place for archive module
+      copy:
+        src: "function.zip"
+        dest: "{{output_dir}}/function.zip"
+      register: function_res
+
+    - name: register bucket
+      s3_bucket:
+        name: "test-bucket-integration"
+        state: present
+        <<: *aws_connection_info
+      register: bucket_info
+
+    - name: register lambda
+      lambda:
+        name: "test-lambda-integration"
+        state: present
+        role: "LambdaUserXLAB"
+        runtime: "python3.7"
+        zip_file: "{{function_res.dest}}"
+        handler: "lambda_function.lambda_handler"
+        memory_size: "128"
+        timeout: "30"
+        <<: *aws_connection_info
+      register: lambda_info
+
+    - name: Add invocation permission of Lambda function on AWS
+      lambda_policy:
+        function_name: "{{ lambda_info.configuration.function_arn }}"
+        statement_id: allow_lambda_invoke
+        action: lambda:InvokeFunction
+        principal: "s3.amazonaws.com"
+        source_arn: "arn:aws:s3:::{{bucket_info.name}}"
+        <<: *aws_connection_info
+
+    - name: register lambda bucket event
+      lambda_bucket_event:
+        state: present
+        event_name: on_file_add_or_remove
+        bucket_name: test-bucket-integration
+        lambda_function_arn: "{{ lambda_info.configuration.function_arn }}"
+        events: ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+        prefix: images/
+        suffix: .jpg
+        <<: *aws_connection_info
+      register: result
+
+    - name: assert result.changed == True
+      assert:
+        that:
+          - result.changed == True
+
+  always:
+    - name: clean-up lambda_bucket_event
+      lambda_bucket_event:
+        event_name: on_file_add_or_remove
+        bucket_name: test-bucket-integration
+        state: absent
+        <<: *aws_connection_info
+
+    - name: clean-up bucket
+      s3_bucket:
+        name: "test-bucket-integration"
+        state: absent
+        <<: *aws_connection_info
+
+    - name: clean-up lambda
+      lambda:
+        name: "test-lambda-integration"
+        state: absent
+        <<: *aws_connection_info
+# ============================================================
+-
+- block:
+
+    # ============================================================
+    - name: test with no conditional parameters
+      lambda_bucket_event:
+        state=present
+        event_name=test
+        bucket_name=test
+      register: result
+      ignore_errors: true
+
+    - name: assert failure when called with no parameters
+      assert:
+        that:
+           - 'result.failed'
+           - 'result.msg.startswith("state is present but all of the following are missing: lambda_function_arn")'
+
+    # ============================================================
+    - name: test with no parameters except state absent
+      lambda_bucket_event:
+        state=absent
+      register: result
+      ignore_errors: true
+
+    - name: assert failure when called with no parameters
+      assert:
+        that:
+           - 'result.failed'
+           - 'result.msg.startswith("missing required arguments: event_name, bucket_name")'
+
+    # ============================================================
+    - name: test abesnt
+      lambda_bucket_event:
+        state=absent
+      register: result
+      ignore_errors: true
+
+    - name: assert failure when called with no parameters
+      assert:
+        that:
+           - 'result.failed'
+           - 'result.msg.startswith("missing required arguments: event_name, bucket_name")'
